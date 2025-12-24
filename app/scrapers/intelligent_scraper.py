@@ -22,6 +22,13 @@ try:
 except ImportError:
     CLOUDSCRAPER_AVAILABLE = False
 
+# Importar FlareSolverr para bypass de Cloudflare (requiere Docker)
+try:
+    from app.scrapers.flaresolverr import FlareSolverr, fetch_with_flaresolverr
+    FLARESOLVERR_MODULE = True
+except ImportError:
+    FLARESOLVERR_MODULE = False
+
 from app.models.schemas import (
     ContentType,
     SiteAnalysis,
@@ -242,10 +249,12 @@ class IntelligentMangaScraper:
 
     def _fetch_page(self, url: str, max_retries: int = 3) -> Optional[str]:
         """
-        Obtiene el HTML de una página con reintentos y bypass de Cloudflare.
+        Obtiene el HTML de una página con bypass de Cloudflare.
 
-        Usa cloudscraper como método primario (mejor para Cloudflare),
-        con fallback a httpx para sitios sin protección.
+        Cadena de fallback:
+        1. FlareSolverr (Docker) - Más efectivo para Cloudflare
+        2. cloudscraper - Bypass básico
+        3. httpx - Para sitios sin protección
 
         Args:
             url: URL a obtener
@@ -254,20 +263,46 @@ class IntelligentMangaScraper:
         Returns:
             HTML de la página o None si falla
         """
-        import time
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-        parsed = urlparse(url)
+        # Método 1: FlareSolverr (el más efectivo para Cloudflare)
+        if FLARESOLVERR_MODULE:
+            result = self._fetch_with_flaresolverr(url)
+            if result:
+                return result
 
-        # Método 1: Intentar con cloudscraper (mejor para Cloudflare)
+        # Método 2: cloudscraper (bypass básico)
         if CLOUDSCRAPER_AVAILABLE:
             result = self._fetch_with_cloudscraper(url, max_retries)
             if result:
                 return result
 
-        # Método 2: Fallback a httpx estándar
+        # Método 3: httpx estándar
         return self._fetch_with_httpx(url, max_retries)
+
+    def _fetch_with_flaresolverr(self, url: str) -> Optional[str]:
+        """Obtiene página usando FlareSolverr (bypass Cloudflare completo)."""
+        try:
+            solver = FlareSolverr()
+
+            if not solver.is_available():
+                print("FlareSolverr no disponible, usando siguiente método...")
+                return None
+
+            print(f"🔓 Usando FlareSolverr para: {url[:50]}...")
+            result = solver.get(url, max_timeout=60000)
+
+            if result.status == "ok" and result.html:
+                print("✅ FlareSolverr: Cloudflare bypasseado!")
+                return result.html
+            else:
+                print(f"⚠️  FlareSolverr: {result.message}")
+                return None
+
+        except Exception as e:
+            print(f"FlareSolverr error: {e}")
+            return None
 
     def _fetch_with_cloudscraper(self, url: str, max_retries: int = 3) -> Optional[str]:
         """Obtiene página usando cloudscraper (bypass Cloudflare)."""
