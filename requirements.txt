@@ -1,0 +1,24 @@
+# API Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.2
+
+# Scraping
+requests==2.31.0
+beautifulsoup4==4.12.2
+lxml==4.9.3
+httpx==0.25.2
+
+# Para sitios con JavaScript
+playwright==1.40.0
+
+# Procesamiento de imágenes (para validar que son manga)
+Pillow==10.1.0
+
+# Utilidades
+python-dotenv==1.0.0
+cachetools==5.3.2
+urllib3==2.1.0
+
+# Para análisis de texto/patrones
+regex==2023.10.3
