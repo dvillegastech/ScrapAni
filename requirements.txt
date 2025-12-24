@@ -8,6 +8,7 @@ requests==2.31.0
 beautifulsoup4==4.12.2
 lxml==4.9.3
 httpx==0.25.2
+cloudscraper==1.2.71
 
 # Para sitios con JavaScript
 playwright==1.40.0

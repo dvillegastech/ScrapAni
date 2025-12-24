@@ -6,12 +6,21 @@ de cualquier sitio web de forma inteligente, detectando patrones automáticament
 """
 
 import re
+import ssl
 import httpx
+import random
 from bs4 import BeautifulSoup, Tag
 from typing import Optional, List, Dict, Any, Tuple
 from urllib.parse import urlparse, urljoin
 from dataclasses import dataclass
 from collections import Counter
+
+# Intentar importar cloudscraper para bypass de Cloudflare
+try:
+    import cloudscraper
+    CLOUDSCRAPER_AVAILABLE = True
+except ImportError:
+    CLOUDSCRAPER_AVAILABLE = False
 
 from app.models.schemas import (
     ContentType,
@@ -54,15 +63,32 @@ class IntelligentMangaScraper:
     - Lista de capítulos
     """
 
+    # Lista de User-Agents para rotación (ayuda a evitar bloqueos)
+    USER_AGENTS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    ]
+
     # Headers para simular un navegador real
     DEFAULT_HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9,es;q=0.8,ja;q=0.7",
         "Accept-Encoding": "gzip, deflate, br",
         "DNT": "1",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
     }
 
     # Patrones que indican imágenes de manga
@@ -137,15 +163,32 @@ class IntelligentMangaScraper:
             timeout: Timeout para requests en segundos
         """
         self.timeout = timeout
-        self.client = httpx.Client(
-            timeout=timeout,
-            headers=self.DEFAULT_HEADERS,
-            follow_redirects=True,
-        )
+        # Crear contexto SSL más permisivo para sitios con configuración problemática
+        self._ssl_context = self._create_ssl_context()
+        self.client = None  # Se crea lazy
+
+    def _create_ssl_context(self):
+        """Crea un contexto SSL más permisivo."""
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        # Habilitar más protocolos para compatibilidad
+        ctx.set_ciphers('DEFAULT:@SECLEVEL=1')
+        return ctx
+
+    def _get_client(self) -> httpx.Client:
+        """Obtiene o crea el cliente HTTP."""
+        if self.client is None:
+            self.client = httpx.Client(
+                timeout=self.timeout,
+                follow_redirects=True,
+                verify=False,  # Deshabilitar verificación SSL estricta
+            )
+        return self.client
 
     def __del__(self):
         """Cierra el cliente HTTP al destruir el objeto."""
-        if hasattr(self, 'client'):
+        if hasattr(self, 'client') and self.client is not None:
             self.client.close()
 
     async def scrape(self, url: str) -> Dict[str, Any]:
@@ -197,28 +240,114 @@ class IntelligentMangaScraper:
 
         return result
 
-    def _fetch_page(self, url: str) -> Optional[str]:
+    def _fetch_page(self, url: str, max_retries: int = 3) -> Optional[str]:
         """
-        Obtiene el HTML de una página.
+        Obtiene el HTML de una página con reintentos y bypass de Cloudflare.
+
+        Usa cloudscraper como método primario (mejor para Cloudflare),
+        con fallback a httpx para sitios sin protección.
 
         Args:
             url: URL a obtener
+            max_retries: Número máximo de reintentos
 
         Returns:
             HTML de la página o None si falla
         """
-        try:
-            # Agregar referer basado en el dominio
-            headers = self.DEFAULT_HEADERS.copy()
-            parsed = urlparse(url)
-            headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+        import time
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-            response = self.client.get(url, headers=headers)
-            response.raise_for_status()
-            return response.text
-        except Exception as e:
-            print(f"Error fetching {url}: {e}")
-            return None
+        parsed = urlparse(url)
+
+        # Método 1: Intentar con cloudscraper (mejor para Cloudflare)
+        if CLOUDSCRAPER_AVAILABLE:
+            result = self._fetch_with_cloudscraper(url, max_retries)
+            if result:
+                return result
+
+        # Método 2: Fallback a httpx estándar
+        return self._fetch_with_httpx(url, max_retries)
+
+    def _fetch_with_cloudscraper(self, url: str, max_retries: int = 3) -> Optional[str]:
+        """Obtiene página usando cloudscraper (bypass Cloudflare)."""
+        import time
+
+        parsed = urlparse(url)
+
+        for attempt in range(max_retries):
+            try:
+                # Crear scraper con browser emulado
+                scraper = cloudscraper.create_scraper(
+                    browser={
+                        'browser': 'chrome',
+                        'platform': 'windows',
+                        'mobile': False,
+                    },
+                    delay=5,
+                )
+
+                headers = self.DEFAULT_HEADERS.copy()
+                headers["User-Agent"] = random.choice(self.USER_AGENTS)
+                headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+
+                response = scraper.get(url, headers=headers, timeout=self.timeout)
+
+                if response.status_code == 200:
+                    return response.text
+                elif response.status_code in [403, 503, 520, 521, 522, 523, 524]:
+                    print(f"Cloudflare block (intento {attempt + 1}): {response.status_code}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2 + attempt * 2)
+                        continue
+                else:
+                    response.raise_for_status()
+                    return response.text
+
+            except Exception as e:
+                print(f"CloudScraper error (intento {attempt + 1}): {type(e).__name__}")
+                if attempt < max_retries - 1:
+                    time.sleep(1 + attempt)
+                    continue
+
+        return None
+
+    def _fetch_with_httpx(self, url: str, max_retries: int = 3) -> Optional[str]:
+        """Obtiene página usando httpx estándar."""
+        import time
+
+        parsed = urlparse(url)
+
+        for attempt in range(max_retries):
+            try:
+                headers = self.DEFAULT_HEADERS.copy()
+                headers["User-Agent"] = random.choice(self.USER_AGENTS)
+                headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+                headers["Host"] = parsed.netloc
+
+                with httpx.Client(
+                    timeout=self.timeout,
+                    follow_redirects=True,
+                    verify=False,
+                ) as client:
+                    response = client.get(url, headers=headers)
+
+                    if response.status_code in [403, 503]:
+                        if attempt < max_retries - 1:
+                            time.sleep(1 + attempt)
+                            continue
+                        return None
+
+                    response.raise_for_status()
+                    return response.text
+
+            except Exception as e:
+                print(f"HTTPX error (intento {attempt + 1}): {type(e).__name__}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+
+        return None
 
     def _analyze_content_type(self, soup: BeautifulSoup, url: str) -> SiteAnalysis:
         """
