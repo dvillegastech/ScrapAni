@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  # API de ScrapAni
+  scrapani:
+    build: .
+    ports:
+      - "8000:8000"
+    depends_on:
+      - flaresolverr
+    environment:
+      - FLARESOLVERR_URL=http://flaresolverr:8191
+    restart: unless-stopped
+
+  # FlareSolverr para bypass de Cloudflare
+  flaresolverr:
+    image: flaresolverr/flaresolverr:latest
+    ports:
+      - "8191:8191"
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=America/Mexico_City
+    restart: unless-stopped
+
+# Para ejecutar:
+#   docker-compose up -d
+#
+# Para ver logs:
+#   docker-compose logs -f
+#
+# Para probar:
+#   curl http://localhost:8000/api/v1/scrape/quick?url=https://manhwa-latino.com/...
